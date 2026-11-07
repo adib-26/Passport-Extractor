@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Extract immigration seals from a Malaysian passport.
+"""Extract a Malaysian passport.
 
-Qwen boxes every seal on the whole page and looks again for any it missed.
-Each seal is turned upright by Qwen picking among eight rendered turns, then
-leveled from the first and last character of its date, then boxed once more
-upright so the cut is tight. Qwen then reads the writing on each seal.
+A biodata page yields the holder name, printed details, and portrait.
+A stamp page yields the seals, the dates on those seals, and the stays.
 """
 
 from __future__ import annotations
@@ -2912,10 +2910,10 @@ def run(source: Path, secrets_path: Path, out_dir: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Extract a Malaysian passport in four layers.")
+    parser = argparse.ArgumentParser(description="Extract a Malaysian passport.")
     parser.add_argument("--source", type=Path, required=True, help="Passport PDF or image")
-    parser.add_argument("--secrets", type=Path, default=DEFAULT_SECRETS)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--secrets", type=Path, default=DEFAULT_SECRETS, help="File that holds OPENROUTER_API_KEY")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Folder for the extraction result")
     args = parser.parse_args()
     if not args.source.is_file():
         raise SystemExit(f"File not found: {args.source}")

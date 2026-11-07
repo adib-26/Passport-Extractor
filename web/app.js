@@ -392,7 +392,7 @@ function render(data) {
   if (!layer4 && !data.layer1 && !data.layer2 && !data.layer3 && !data.running) {
     const note = document.createElement("p");
     note.className = "empty";
-    note.append(text("Upload a passport. Each cut-out is checked, and only seals are shown."));
+    note.append(text("Upload a Malaysian passport. A biodata page shows the holder. A stamp page shows the seals, dates, and stays."));
     results.append(note);
     return;
   }

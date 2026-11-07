@@ -2,6 +2,3 @@ pymupdf>=1.24.0
 requests>=2.32.0
 opencv-python-headless>=4.10.0
 numpy>=2.0.0
-torch
-transformers>=4.49
-pillow

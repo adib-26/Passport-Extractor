@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local website for Malaysian passport extraction."""
+"""Local site for Malaysian passport extraction."""
 
 from __future__ import annotations
 

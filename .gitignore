@@ -1,6 +1,7 @@
 secrets.env
 output/
 input/uploads/
+saved/
 __pycache__/
 .venv/
 *.pyc
