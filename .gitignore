@@ -1,0 +1,8 @@
+secrets.env
+output/
+input/uploads/
+__pycache__/
+.venv/
+*.pyc
+.DS_Store
+_preview/

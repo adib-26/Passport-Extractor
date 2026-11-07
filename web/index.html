@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Passport extractor</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="mast">
+    <p class="kicker">Malaysian passport</p>
+    <div class="mast-row">
+      <h1>Passport extractor</h1>
+      <div class="actions">
+        <label class="upload" for="file">
+          Upload passport
+          <input id="file" name="file" type="file" accept="application/pdf,image/*">
+        </label>
+        <button type="button" id="run">Run again</button>
+      </div>
+    </div>
+    <p class="lede">Each seal is read, and the text is written underneath.</p>
+  </header>
+  <p class="status" id="status" role="status" aria-live="polite"></p>
+  <main id="results"></main>
+  <dialog id="seal-editor" aria-labelledby="seal-title">
+    <form id="seal-form" method="post" action="/api/layer4">
+      <p id="seal-title">Edit stamp text</p>
+      <label for="seal-country">Country</label>
+      <input id="seal-country" name="country" autocomplete="off" maxlength="200">
+      <label for="seal-text">Stamp text</label>
+      <textarea id="seal-text" name="text" rows="8" maxlength="4000"></textarea>
+      <div class="dialog-actions">
+        <button type="submit">Save</button>
+        <button type="button" id="seal-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="stamp-view" aria-labelledby="stamp-title">
+    <p id="stamp-title">Stamp</p>
+    <img id="stamp-photo" alt="Stamp the date was read from">
+    <div class="dialog-actions">
+      <button type="button" id="stamp-close">Close</button>
+    </div>
+  </dialog>
+  <dialog id="stay-editor" aria-labelledby="stay-title">
+    <form id="stay-form" method="post" action="/api/layer6">
+      <p id="stay-title">Edit stay</p>
+      <label for="departure-country">Departure country</label>
+      <input id="departure-country" name="departure_country" autocomplete="off" maxlength="200">
+      <label for="arrival-country">Arrival country</label>
+      <input id="arrival-country" name="arrival_country" autocomplete="off" maxlength="200">
+      <div class="date-pair">
+        <div>
+          <label for="start-date">Start date</label>
+          <input id="start-date" name="start" type="date" min="1980-01-01" max="2029-12-31" autocomplete="off">
+        </div>
+        <div>
+          <label for="end-date">End date</label>
+          <input id="end-date" name="end" type="date" min="1980-01-01" max="2029-12-31" autocomplete="off">
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button type="submit">Save</button>
+        <button type="button" id="stay-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>
