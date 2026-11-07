@@ -1,8 +1,10 @@
 # Passport Extractor
 
-Local tool for a Malaysian passport. It reads the holder page, or the immigration and visa stamps, and shows the result in a browser on this machine.
+## About
 
-A biodata page produces the holder’s name, the printed details, and a portrait. A stamp page produces each seal, the dates on those seals, and the stays built from those dates. The two kinds of page are not mixed: a biodata page is not searched for seals, and a stamp page is not treated as the holder page.
+Passport Extractor reads a Malaysian passport on this computer and shows the result in a browser. A biodata page produces the holder’s name, the printed details, and a portrait. A stamp page produces each immigration or visa seal, the dates on those seals, and the stays built from those dates.
+
+The two kinds of page stay separate. A biodata page is not searched for seals, and a stamp page is not treated as the holder page. Uploads and results remain on this machine. The repository does not contain passport scans or an API key.
 
 ## What you need
 
