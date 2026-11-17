@@ -12,7 +12,7 @@ The two kinds of page stay separate. A biodata page is not searched for seals, a
 - [Tesseract OCR](https://github.com/tesseract-ocr/tesseract), used to tell a biodata page from a stamp page
 - An [OpenRouter](https://openrouter.ai/) API key
 
-The holder page and each seal image are sent to OpenRouter for reading. The site itself listens only on `127.0.0.1`.
+The holder page and each seal image are sent to OpenRouter for reading. The holder page is the page as the uploaded file shows it. Seal finding uses the photograph with the most ink when a scan stores more than one picture of the same page. The site itself listens only on `127.0.0.1`.
 
 ## Setup
 
@@ -32,7 +32,7 @@ Open `secrets.env` and set `OPENROUTER_API_KEY`. That file is not part of the re
 .venv/bin/python server.py
 ```
 
-Open http://127.0.0.1:8766, upload a PDF or image, and wait for the extract to finish. Use **Run again** to repeat the last file.
+Open http://127.0.0.1:8766, upload a PDF or image, and the page shows each layer as soon as that layer finishes. Use **Run again** to repeat the last file.
 
 You can also run the extractor on its own:
 
@@ -55,13 +55,13 @@ You can also run the extractor on its own:
 
 Empty layers are omitted. Dates are written as `DD MON YYYY`, for example `16 FEB 1936`.
 
-On a stamp page you can correct a seal or a stay, and you can add a stay. For this passport, departure and arrival cannot both be Malaysia. An end date cannot be earlier than the start date.
+On a stamp page you can correct a seal or a stay, and you can add a stay. **Page** opens the uploaded page that seal was cut from. Each date and each stay can be marked **Agree**, **Don't agree**, or **Unsure**. For this passport, departure and arrival cannot both be Malaysia. An end date cannot be earlier than the start date.
 
 ## Models
 
 | Task | Model |
 | --- | --- |
-| Holder name and biodata fields | `qwen/qwen3-vl-235b-a22b-instruct` |
+| Holder name and biodata fields | `qwen/qwen3.8-flash` |
 | Finding and framing seals, and choosing between two readings | `qwen/qwen3.8-flash` |
 | First reading of a seal | `qwen/qwen3-vl-235b-a22b-instruct` |
 | Second reading of a seal | `z-ai/glm-5.3-flashx` |
