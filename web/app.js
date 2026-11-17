@@ -54,12 +54,24 @@ function galleryFor(layer4, prefix) {
     }
     figure.append(photo, caption);
     if (typeof seal !== "string" && seal.file) {
+      const actions = document.createElement("div");
+      actions.className = "row-actions";
+      const page = pageNumber(seal.page);
+      if (page) {
+        const pageButton = document.createElement("button");
+        pageButton.type = "button";
+        pageButton.className = "seal-edit";
+        pageButton.textContent = "Page";
+        pageButton.addEventListener("click", () => openPage(page));
+        actions.append(pageButton);
+      }
       const button = document.createElement("button");
       button.type = "button";
       button.className = "seal-edit";
       button.textContent = "Edit";
       button.addEventListener("click", () => openSeal(seal.file));
-      figure.append(button);
+      actions.append(button);
+      figure.append(actions);
     }
     gallery.append(figure);
   }
@@ -157,10 +169,49 @@ function dateValue(value) {
   return `${match[3]}-${String(month).padStart(2, "0")}-${match[1]}`;
 }
 
+const VERDICTS = [
+  ["agree", "Agree"],
+  ["disagree", "Don't agree"],
+  ["unsure", "Unsure"],
+];
+
+function verdictGroup(label, current, onChoose) {
+  const group = document.createElement("div");
+  group.className = "verdict";
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", label);
+  for (const [value, name] of VERDICTS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "verdict-choice";
+    button.textContent = name;
+    button.setAttribute("aria-pressed", String(current === value));
+    button.addEventListener("click", () => onChoose(value));
+    group.append(button);
+  }
+  return group;
+}
+
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!data.ok) {
+    statusNode.textContent = data.error || "That choice was not saved";
+    statusNode.className = "status error";
+    return false;
+  }
+  refresh();
+  return true;
+}
+
 function datesFor(layer) {
   const list = document.createElement("div");
   list.className = "date-list";
-  const rows = (Array.isArray(layer.dates) ? layer.dates : []).slice().sort((left, right) => {
+  const rows = (Array.isArray(layer.dates) ? layer.dates : []).map((row, index) => ({ ...row, index })).sort((left, right) => {
     const order = dateValue(left.date).localeCompare(dateValue(right.date));
     return order;
   });
@@ -190,25 +241,55 @@ function datesFor(layer) {
       article.append(block);
     }
     const file = fieldText(row, "file");
+    const actions = document.createElement("div");
+    actions.className = "row-actions";
     if (/^seals\/\d+\.jpg$/.test(file)) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = "Stamp";
       button.addEventListener("click", () => openStamp(file));
-      article.append(button);
+      actions.append(button);
     }
+    const page = pageNumber(row.page);
+    if (page) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Page";
+      button.addEventListener("click", () => openPage(page));
+      actions.append(button);
+    }
+    if (actions.childElementCount) article.append(actions);
+    article.append(verdictGroup("Does this date look right?", fieldText(row, "review"), (review) => {
+      postJson("/api/layer5", { index: row.index, review });
+    }));
     list.append(article);
   });
   return list;
 }
 
+function pageNumber(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : 0;
+}
+
 const stampDialog = document.querySelector("#stamp-view");
 const stampPhoto = document.querySelector("#stamp-photo");
 document.querySelector("#stamp-close").addEventListener("click", () => stampDialog.close());
+const pageDialog = document.querySelector("#page-view");
+const pagePhoto = document.querySelector("#page-photo");
+const pageTitle = document.querySelector("#page-title");
+document.querySelector("#page-close").addEventListener("click", () => pageDialog.close());
 
 function openStamp(file) {
   stampPhoto.src = `/${file}`;
   stampDialog.showModal();
+}
+
+function openPage(number) {
+  pageTitle.textContent = `Page ${number}`;
+  pagePhoto.alt = `Passport page ${number}`;
+  pagePhoto.src = `/pages/${number}.jpg`;
+  pageDialog.showModal();
 }
 
 function staysFor(layer2) {
@@ -219,6 +300,7 @@ function staysFor(layer2) {
     arrival_country: fieldText(stay, "arrival_country"),
     start: fieldText(stay, "start"),
     end: fieldText(stay, "end"),
+    review: fieldText(stay, "review"),
   })) : [];
   const add = document.createElement("button");
   add.type = "button";
@@ -256,6 +338,13 @@ function staysFor(layer2) {
     button.textContent = "Edit";
     button.addEventListener("click", () => openStay(index));
     row.append(button);
+    row.append(verdictGroup("Does this stay look right?", stay.review, (review) => {
+      const next = stays.map((item, itemIndex) => ({
+        ...item,
+        review: itemIndex === index ? review : item.review,
+      }));
+      postJson("/api/layer6", { stays: next });
+    }));
     list.append(row);
   });
   return list;
@@ -300,6 +389,7 @@ stayForm.addEventListener("submit", async (event) => {
     arrival_country: stayForm.elements.arrival_country.value.trim(),
     start: fromDateInput(startValue),
     end: fromDateInput(endValue),
+    review: editing < stays.length ? stays[editing].review : "",
   };
   if (editing === stays.length) next.push(draft);
   else next[editing] = draft;
@@ -399,14 +489,6 @@ function render(data) {
 
   appendIdentity(data, results);
 
-  if (layer4 && layer4.status === "running" && !layer4.seals.length) {
-    const note = document.createElement("p");
-    note.className = "empty";
-    note.append(text("Reading the seals."));
-    results.append(note);
-    return;
-  }
-
   if (layer4 && Array.isArray(layer4.seals) && layer4.seals.length) {
     seals = layer4.seals.filter((seal) => typeof seal !== "string").map((seal) => ({
       file: seal.file,
@@ -415,12 +497,18 @@ function render(data) {
     }));
     const name = layer4.source || data.source || "This passport";
     results.append(card(`Layer 4 · ${name} · ${sealCount(layer4)}`, galleryFor(layer4, "/")));
-    if (data.layer5 && Array.isArray(data.layer5.dates)) {
-      results.append(card("Layer 5", datesFor(data.layer5)));
-    }
-    if (data.layer6 && Array.isArray(data.layer6.stays)) {
-      results.append(card("Layer 6", staysFor(data.layer6)));
-    }
+  } else if (layer4 && layer4.status === "running") {
+    const note = document.createElement("p");
+    note.className = "empty";
+    note.append(text("Reading the seals."));
+    results.append(note);
+  }
+
+  if (data.layer5 && Array.isArray(data.layer5.dates)) {
+    results.append(card("Layer 5", datesFor(data.layer5)));
+  }
+  if (data.layer6 && Array.isArray(data.layer6.stays)) {
+    results.append(card("Layer 6", staysFor(data.layer6)));
   }
 }
 

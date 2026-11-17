@@ -14,8 +14,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
@@ -30,6 +31,7 @@ DEFAULT_OUT = ROOT / "output"
 SAVED_DIR = ROOT / "saved"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
 MODEL = "qwen/qwen3.8-flash"
 # Fast vision model for turning, leveling, place names, and the second reading.
 VISION_MODEL = "qwen/qwen3-vl-235b-a22b-instruct"
@@ -256,6 +258,7 @@ class OpenRouter:
         self.last_model = MODEL
         self.active_model = MODEL
         self.models_used = []
+        self._lock = threading.Lock()
 
     def complete(self, prompt: str, max_tokens: int | None = None, images: list | None = None, model: str | None = None) -> dict:
         last_error: Exception | None = None
@@ -271,8 +274,7 @@ class OpenRouter:
                         "OpenRouter rejected the API key in secrets.env. "
                         "Paste a current key in that file and run the extractor again.\n" + body
                     ) from exc
-                if status == 400 and "response_format" in self.extra:
-                    self.extra.pop("response_format", None)
+                if status == 400 and self._drop_response_format():
                     last_error = exc
                     continue
                 last_error = exc
@@ -290,8 +292,7 @@ class OpenRouter:
                 last_error = exc
                 if "finish_reason=length" in str(exc):
                     break
-                if "response_format" in str(exc) and "response_format" in self.extra:
-                    self.extra.pop("response_format", None)
+                if "response_format" in str(exc) and self._drop_response_format():
                     continue
                 if attempt < 2:
                     time.sleep(2)
@@ -321,10 +322,12 @@ class OpenRouter:
                 content.append({"type": "image_url", "image_url": {"url": _jpeg_data_url(image)}})
         else:
             content = prompt
+        with self._lock:
+            extra = dict(self.extra)
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": content}],
-            **self.extra,
+            **extra,
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
@@ -349,10 +352,18 @@ class OpenRouter:
         if not text.strip():
             reason = choice.get("finish_reason") or "empty"
             raise ValueError(f"Model returned no text (finish_reason={reason})")
-        self.last_model = model
-        if model not in self.models_used:
-            self.models_used.append(model)
+        with self._lock:
+            self.last_model = model
+            if model not in self.models_used:
+                self.models_used.append(model)
         return parse_json(text)
+
+    def _drop_response_format(self) -> bool:
+        with self._lock:
+            if "response_format" not in self.extra:
+                return False
+            self.extra.pop("response_format", None)
+            return True
 
 
 def _jpeg_data_url(image: np.ndarray) -> str:
@@ -402,11 +413,26 @@ def page_bgr(doc: pymupdf.Document, page: pymupdf.Page) -> np.ndarray:
         largest = max(image.shape[0] * image.shape[1] for image in decoded)
         candidates = [image for image in decoded if image.shape[0] * image.shape[1] >= largest * 0.55]
         return max(candidates, key=_ink_fraction)
-    pix = page.get_pixmap(matrix=pymupdf.Matrix(3, 3), alpha=False)
+    return uploaded_bgr(page)
+
+
+def uploaded_bgr(page: pymupdf.Page) -> np.ndarray:
+    """The page as the uploaded PDF shows it, before a layer is chosen for the seals."""
+    longest = max(float(page.rect.width), float(page.rect.height), 1.0)
+    scale = 1600 / longest
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
     array = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)
     if pix.n == 4:
         return cv2.cvtColor(array, cv2.COLOR_RGBA2BGR)
     return cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
+
+
+def holder_image(page: dict) -> np.ndarray | None:
+    """Layers 1–3 read the uploaded page. Seal finding keeps its own image."""
+    image = page.get("uploaded")
+    if image is None:
+        image = page.get("image")
+    return image
 
 
 def image_file_bgr(path: Path) -> np.ndarray:
@@ -463,8 +489,9 @@ def read_pages(path: Path) -> list[dict]:
         try:
             for index, page in enumerate(doc, start=1):
                 image = page_bgr(doc, page)
+                uploaded = uploaded_bgr(page)
                 embedded = page.get_text("text")
-                ocr = " ".join(ocr_image(image).split())
+                ocr = " ".join(ocr_image(uploaded).split())
                 text = ocr
                 if embedded and embedded not in ocr:
                     text = f"{ocr}\nEmbedded text: {embedded}".strip()
@@ -482,6 +509,7 @@ def read_pages(path: Path) -> list[dict]:
                     "text": text,
                     "embedded": embedded,
                     "image": image,
+                    "uploaded": uploaded,
                     "extras": extras,
                 })
                 print(f"[Read] page {index}: {len(text)} characters", flush=True)
@@ -492,7 +520,7 @@ def read_pages(path: Path) -> list[dict]:
         image = image_file_bgr(path)
         text = " ".join(ocr_image(image).split())
         print(f"[Read] image: {len(text)} characters", flush=True)
-        return [{"number": 1, "text": text, "embedded": "", "image": image, "extras": []}]
+        return [{"number": 1, "text": text, "embedded": "", "image": image, "uploaded": image, "extras": []}]
     raise SystemExit("Use a PDF or an image of a Malaysian passport.")
 
 
@@ -591,15 +619,15 @@ def _person_name(value) -> str | None:
 
 
 def layer1_from_image(client: OpenRouter, pages: list[dict]) -> dict | None:
-    """Read the holder name from the page with Qwen OCR."""
+    """Read the holder name from the page image."""
     for page in pages:
-        image = page.get("image")
+        image = holder_image(page)
         if image is None:
             continue
         data = client.complete(
             LAYER1_IMAGE_PROMPT,
             images=[image],
-            model=QWEN_OCR_MODEL,
+            model=MODEL,
         )
         name = _person_name(data.get("name"))
         if not name:
@@ -653,8 +681,9 @@ def layer2(client: OpenRouter, pages: list[dict], layer1_doc: dict, from_image: 
         raise SystemExit("Layer 2 starts only after Layer 1 has finished.")
     page_no = layer1_doc["page"]
     page = next(item for item in pages if item["number"] == page_no)
-    if from_image and page.get("image") is not None:
-        data = client.complete(LAYER2_IMAGE_PROMPT, images=[page["image"]], model=QWEN_OCR_MODEL)
+    shown = holder_image(page)
+    if from_image and shown is not None:
+        data = client.complete(LAYER2_IMAGE_PROMPT, images=[shown], model=MODEL)
     else:
         data = client.complete(
             LAYER2_PROMPT + f"--- page {page_no} ---\n{page['text']}",
@@ -671,8 +700,8 @@ def layer2(client: OpenRouter, pages: list[dict], layer1_doc: dict, from_image: 
         )
         raw = data.get("attributes") if isinstance(data.get("attributes"), dict) else data
     labels = {}
-    if from_image and page.get("image") is not None:
-        labels = client.complete(LAYER2_LABEL_PROMPT, images=[page["image"]], model=VISION_MODEL)
+    if from_image and shown is not None:
+        labels = client.complete(LAYER2_LABEL_PROMPT, images=[shown], model=MODEL)
         if not isinstance(labels, dict):
             labels = {}
     attributes = {}
@@ -2241,6 +2270,18 @@ def _replace_date(text: str, date_label: str) -> str:
     return f"{text}\n{date_label}" if text else date_label
 
 
+def _marks(text: str) -> set[str]:
+    return {item.casefold() for item in re.findall(r"[A-Za-z]+|\d+", text)}
+
+
+def _uses_only(text: str, *sources: str) -> bool:
+    """A mix may use words and digits from the two readings, and nothing else."""
+    allowed: set[str] = set()
+    for source in sources:
+        allowed |= _marks(source)
+    return _marks(text) <= allowed
+
+
 def _choose_reading(client: OpenRouter, image: np.ndarray, qwen_text: str, glm_text: str) -> str:
     """Qwen 3.8 keeps one reading, or mixes the two, and settles a disputed date from the ink."""
     if not qwen_text:
@@ -2248,7 +2289,12 @@ def _choose_reading(client: OpenRouter, image: np.ndarray, qwen_text: str, glm_t
     if not glm_text or _same_reading(qwen_text, glm_text):
         return qwen_text
     prompt = JUDGE_PROMPT.replace("{a}", qwen_text).replace("{b}", glm_text)
-    mixed = _seal_lines((client.ask(prompt, [image], model=MODEL) or {}).get("text")) or glm_text
+    mixed = _seal_lines((client.ask(prompt, [image], model=MODEL) or {}).get("text"))
+    if mixed and not _uses_only(mixed, qwen_text, glm_text):
+        print("[Layer 4] the mix added a mark neither reader saw, keeping the first reading", flush=True)
+        mixed = ""
+    if not mixed:
+        mixed = qwen_text
     settled = _star_settled_date(qwen_text, glm_text)
     if settled:
         return _replace_date(mixed, settled)
@@ -2256,16 +2302,22 @@ def _choose_reading(client: OpenRouter, image: np.ndarray, qwen_text: str, glm_t
     glm_date = _date_label(glm_text)
     if qwen_date and glm_date and qwen_date != glm_date:
         date_prompt = DATE_PROMPT.replace("{a}", qwen_text).replace("{b}", glm_text)
-        decided = str((client.ask(date_prompt, [image], model=MODEL) or {}).get("date") or "").strip()
-        mixed = _replace_date(mixed, _seal_lines(decided) or decided)
+        decided = _seal_lines((client.ask(date_prompt, [image], model=MODEL) or {}).get("date"))
+        if decided and _uses_only(decided, qwen_text, glm_text):
+            mixed = _replace_date(mixed, decided)
+        elif decided:
+            print("[Layer 4] the date was not in either reading, left unchanged", flush=True)
     return mixed
 
 
 def _read_seal(client: OpenRouter, image: np.ndarray) -> tuple[bool, str, str | None]:
-    """Qwen reads the stamp, GLM reads it again, and Qwen 3.8 keeps or mixes them."""
+    """Qwen and GLM read the stamp together, then Qwen 3.8 keeps or mixes them."""
     image = _for_reading(image)
-    qwen = client.ask(READ_PROMPT, [image], model=QWEN_OCR_MODEL) or {}
-    glm = client.ask(READ_PROMPT, [image], model=GLM_OCR_MODEL) or {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        qwen_job = pool.submit(client.ask, READ_PROMPT, [image], QWEN_OCR_MODEL)
+        glm_job = pool.submit(client.ask, READ_PROMPT, [image], GLM_OCR_MODEL)
+        qwen = qwen_job.result() or {}
+        glm = glm_job.result() or {}
     qwen_text = _seal_lines(qwen.get("text"))
     glm_text = _seal_lines(glm.get("text"))
     text = _choose_reading(client, image, qwen_text, glm_text)
@@ -2312,8 +2364,11 @@ def read_saved_seals(out_dir: Path | None = None) -> dict:
             _kept, text, country = _read_seal(client, image)
             if not text:
                 text, country = previous.get("text") or "", previous.get("country")
+        kept = {"file": file_name, "text": text, "country": country}
+        if previous.get("page"):
+            kept["page"] = previous.get("page")
         print(f"[Layer 4] {file_name}: {country or ''} {text}", flush=True)
-        return {"file": file_name, "text": text, "country": country}
+        return kept
 
     with ThreadPoolExecutor(max_workers=SEAL_WORKERS) as pool:
         seals = list(pool.map(one, items))
@@ -2337,11 +2392,13 @@ def layer4(pages: list[dict], client: OpenRouter, out_dir: Path | None = None, s
     _refuse_saved(folder)
     stays_path = folder / "layer4_stays.json"
     seal_dir = folder / "seals"
-    if seal_dir.is_dir():
-        for old in seal_dir.glob("*"):
-            if old.is_file():
-                old.unlink()
-    seal_dir.mkdir(parents=True, exist_ok=True)
+    page_dir = folder / "pages"
+    for folder_path in (seal_dir, page_dir):
+        if folder_path.is_dir():
+            for old in folder_path.glob("*"):
+                if old.is_file():
+                    old.unlink()
+        folder_path.mkdir(parents=True, exist_ok=True)
     images: list[dict] = []
     _write_seals(stays_path, images, "running", source)
     for page in pages:
@@ -2353,11 +2410,18 @@ def layer4(pages: list[dict], client: OpenRouter, out_dir: Path | None = None, s
             continue
         pieces = _page_seals(client, page_image)
         print(f"[Layer 4] page {page['number']}: {len(pieces)} seals cut", flush=True)
+        page_no = int(page["number"])
+        page_dir = folder / "pages"
+        page_dir.mkdir(parents=True, exist_ok=True)
+        shown = holder_image(page)
+        if shown is None:
+            shown = page_image
+        cv2.imwrite(str(page_dir / f"{page_no}.jpg"), shown, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
         page_start = len(images)
         for offset, piece in enumerate(pieces, start=1):
             name = f"{page_start + offset}.jpg"
             cv2.imwrite(str(seal_dir / name), piece, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-            images.append({"file": f"seals/{name}", "text": "", "country": None})
+            images.append({"file": f"seals/{name}", "text": "", "country": None, "page": page_no})
         _write_seals(stays_path, images, "running", source)
         with ThreadPoolExecutor(max_workers=SEAL_WORKERS) as pool:
             checked = list(pool.map(lambda piece: _read_seal(client, piece), pieces))
@@ -2368,7 +2432,7 @@ def layer4(pages: list[dict], client: OpenRouter, out_dir: Path | None = None, s
                 continue
             name = f"{len(images) + 1}.jpg"
             cv2.imwrite(str(seal_dir / name), piece, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-            images.append({"file": f"seals/{name}", "text": text, "country": country})
+            images.append({"file": f"seals/{name}", "text": text, "country": country, "page": page_no})
             print(f"[Layer 4] {name}: {country or ''} {text}", flush=True)
         for stale in range(len(images) + 1, page_start + len(pieces) + 1):
             (seal_dir / f"{stale}.jpg").unlink(missing_ok=True)
@@ -2376,8 +2440,12 @@ def layer4(pages: list[dict], client: OpenRouter, out_dir: Path | None = None, s
     _unify_seal_dates(images)
     document = _write_seals(stays_path, images, "finished", source)
     print(f"[Layer 4] finished: {len(images)} seals", flush=True)
-    events, stays = _layer2(client, images)
-    _write_dates(folder / "layer5_dates.json", events, source)
+
+    def publish_dates(events: list[dict]) -> None:
+        _write_dates(folder / "layer5_dates.json", events, source)
+        print(f"[Layer 5] {len(events)} dates", flush=True)
+
+    events, stays = _layer2(client, images, on_events=publish_dates)
     _write_layer6(folder / "layer6_stays.json", stays, source)
     return document
 
@@ -2656,6 +2724,7 @@ def _dated_events(seals: list[dict]) -> list[dict]:
                 **part,
                 "stamp": stamp,
                 "file": str(seal.get("file") or f"seals/{stamp}.jpg"),
+                "page": seal.get("page"),
                 "country": country,
                 "key": key,
                 "text": str(seal.get("text") or "").strip(),
@@ -2680,6 +2749,7 @@ def _dated_events(seals: list[dict]) -> list[dict]:
             "id": len(events) + 1,
             "stamp": item["stamp"],
             "file": item["file"],
+            "page": item.get("page"),
             "country": item["country"],
             "key": item["key"],
             "date": label,
@@ -2737,11 +2807,13 @@ def _pair_events(events: list[dict]) -> list[dict]:
     return stays
 
 
-def _layer2(client: OpenRouter, seals: list[dict]) -> tuple[list[dict], list[dict]]:
+def _layer2(client: OpenRouter, seals: list[dict], on_events=None) -> tuple[list[dict], list[dict]]:
     """Qwen classifies each date; deterministic matching keeps all dates valid."""
     events = _dated_events(seals)
     if not events:
-        return []
+        if on_events:
+            on_events([])
+        return [], []
     blocks = [
         f"Event {event['id']}\nStamp: {event['stamp']}\n"
         f"Country: {event['country'] or 'unknown'}\nDate: {event['date']}\n"
@@ -2764,6 +2836,8 @@ def _layer2(client: OpenRouter, seals: list[dict]) -> tuple[list[dict], list[dic
             roles[event_id] = role
     for event in events:
         event["role"] = roles.get(event["id"], "unknown")
+    if on_events:
+        on_events(events)
     stays = _pair_events(events)
     print(f"[Layer 6] {len(stays)} trips", flush=True)
     return events, stays
@@ -2780,6 +2854,7 @@ def _date_rows(events: list[dict]) -> list[dict]:
             "date": event["date"],
             "type": event["role"],
             "file": event.get("file") or "",
+            "page": event.get("page"),
         }
         for event in ordered
     ]
@@ -2837,9 +2912,10 @@ def portrait_crop(image: np.ndarray) -> np.ndarray | None:
 def layer3(pages: list[dict], layer1_doc: dict, out_dir: Path) -> dict | None:
     page_no = layer1_doc.get("page")
     page = next((item for item in pages if item["number"] == page_no), None)
-    if page is None or page.get("image") is None:
+    shown = None if page is None else holder_image(page)
+    if shown is None:
         return None
-    crop = portrait_crop(page["image"])
+    crop = portrait_crop(shown)
     if crop is None:
         return None
     cv2.imwrite(str(out_dir / "portrait.jpg"), crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
@@ -2854,6 +2930,58 @@ def layer3(pages: list[dict], layer1_doc: dict, out_dir: Path) -> dict | None:
 def _write_json(path: Path, document: dict) -> None:
     _refuse_saved(path.parent)
     path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _run_identity(client: OpenRouter, pages: list[dict], biodata_pages: list[dict], out_dir: Path) -> None:
+    """Layers 1–3. Layer 2 and the portrait start together only after the name is known."""
+    if not biodata_pages:
+        return
+    print("[Layer 1] reading the name", flush=True)
+    holder = layer1_from_image(client, biodata_pages)
+    if not holder:
+        print("[Layer 1] looking for the holder name", flush=True)
+        holder = layer1(client, biodata_pages)
+    if not holder or not holder.get("name"):
+        return
+    from_image = bool(holder.pop("from_image", False))
+    _write_json(out_dir / "layer1_name.json", holder)
+    print(f"[Layer 1] {holder['name']}", flush=True)
+    print("[Layer 2] reading the biodata", flush=True)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = {
+            pool.submit(layer2, client, pages, holder, from_image): "attributes",
+            pool.submit(layer3, pages, holder, out_dir): "portrait",
+        }
+        for job in as_completed(jobs):
+            kind = jobs[job]
+            result = job.result()
+            if kind == "attributes" and result.get("attributes"):
+                _write_json(out_dir / "layer2_attributes.json", result)
+                print(f"[Layer 2] {len(result['attributes'])} fields", flush=True)
+            elif kind == "portrait" and result:
+                _write_json(out_dir / "layer3_image.json", result)
+                print("[Layer 3] portrait saved", flush=True)
+
+
+def _run_seals(client: OpenRouter, seal_pages: list[dict], out_dir: Path, source_name: str) -> None:
+    """Layers 4–6. Dates are classified only after every seal text has been settled."""
+    if not seal_pages:
+        print("[Layer 4] biodata page, seals not read", flush=True)
+        return
+    print("[Layer 4] finding seals", flush=True)
+    stays = layer4(seal_pages, client, out_dir, source_name)
+    print(f"[Layer 4] finished: {len(stays['seals'])} seals -> layer4_stays.json", flush=True)
+
+
+def _wait_all(jobs) -> None:
+    errors: list[BaseException] = []
+    for job in jobs:
+        try:
+            job.result()
+        except BaseException as exc:
+            errors.append(exc)
+    if errors:
+        raise errors[0]
 
 
 def run(source: Path, secrets_path: Path, out_dir: Path) -> None:
@@ -2879,34 +3007,16 @@ def run(source: Path, secrets_path: Path, out_dir: Path) -> None:
 
     client = OpenRouter(load_api_key(secrets_path))
     biodata_pages = _biodata_pages(pages)
-    holder = None
-    if biodata_pages:
-        print("[Layer 1] reading the name with Qwen OCR", flush=True)
-        holder = layer1_from_image(client, biodata_pages)
-        if not holder:
-            print("[Layer 1] looking for the holder name", flush=True)
-            holder = layer1(client, biodata_pages)
-    if holder and holder.get("name"):
-        from_image = bool(holder.pop("from_image", False))
-        _write_json(out_dir / "layer1_name.json", holder)
-        print(f"[Layer 1] {holder['name']}", flush=True)
-        print("[Layer 2] reading the biodata", flush=True)
-        details = layer2(client, pages, holder, from_image=from_image)
-        if details.get("attributes"):
-            _write_json(out_dir / "layer2_attributes.json", details)
-            print(f"[Layer 2] {len(details['attributes'])} fields", flush=True)
-        portrait = layer3(pages, holder, out_dir)
-        if portrait:
-            _write_json(out_dir / "layer3_image.json", portrait)
-            print("[Layer 3] portrait saved", flush=True)
     biodata_numbers = {page["number"] for page in biodata_pages}
     seal_pages = [page for page in pages if page.get("number") not in biodata_numbers]
-    if not seal_pages:
-        print("[Layer 4] biodata page, seals not read", flush=True)
-        return
-    print("[Layer 4] finding seals", flush=True)
-    stays = layer4(seal_pages, client, out_dir, source.name)
-    print(f"[Layer 4] finished: {len(stays['seals'])} seals -> layer4_stays.json", flush=True)
+    # The holder page and the stamp pages do not share a result. Layer 5 still
+    # waits until the seal texts are final, then the dates are saved in order.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = [
+            pool.submit(_run_identity, client, pages, biodata_pages, out_dir),
+            pool.submit(_run_seals, client, seal_pages, out_dir, source.name),
+        ]
+        _wait_all(jobs)
 
 
 def main() -> None:

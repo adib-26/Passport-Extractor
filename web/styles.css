@@ -243,11 +243,36 @@ dd { margin: 0; }
   min-height: 48px;
 }
 
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.verdict {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.4rem;
+}
+
+.verdict-choice {
+  flex: 1 1 0;
+  white-space: nowrap;
+}
+
+.verdict-choice[aria-pressed="true"] {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
 #seal-editor {
   width: min(32rem, calc(100% - 2rem));
 }
 
-#stamp-view {
+#stamp-view,
+#page-view {
   width: min(36rem, calc(100% - 2rem));
 }
 
@@ -257,7 +282,8 @@ dd { margin: 0; }
   font-size: 0.95rem;
 }
 
-#stamp-photo {
+#stamp-photo,
+#page-photo {
   display: block;
   width: 100%;
   height: auto;

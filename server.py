@@ -25,6 +25,14 @@ UPLOADS = ROOT / "input" / "uploads"
 HOST = "127.0.0.1"
 PORT = 8766
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+REVIEWS = {"agree", "disagree", "unsure"}
+
+
+def _review(value) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in REVIEWS else ""
+
+
 ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
 FILES = {
@@ -193,6 +201,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path.startswith("/pages/"):
+            name = Path(path).name
+            folder = (OUT / "pages").resolve()
+            image = (folder / name).resolve()
+            if not re.fullmatch(r"\d+\.jpg", name) or image.parent != folder or not image.is_file():
+                self.send_error(404)
+                return
+            body = image.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path.startswith("/seals/") or path.startswith("/saved/seals/"):
             name = Path(path).name
             folder = SAVED / "seals" if path.startswith("/saved/seals/") else OUT / "seals"
@@ -231,6 +254,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/layer4":
             self.save_layer4()
+            return
+        if path == "/api/layer5":
+            self.save_layer5()
             return
         if path == "/api/layer6":
             self.save_layer6()
@@ -297,6 +323,38 @@ class Handler(BaseHTTPRequestHandler):
         path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
         self.send_json({"ok": True})
 
+    def save_layer5(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > 20_000:
+            self.send_json({"ok": False, "error": "That choice could not be saved."}, 400)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_json({"ok": False, "error": "That choice could not be read."}, 400)
+            return
+        if not isinstance(payload, dict):
+            self.send_json({"ok": False, "error": "That choice could not be read."}, 400)
+            return
+        try:
+            index = int(payload.get("index"))
+        except (TypeError, ValueError):
+            self.send_json({"ok": False, "error": "Choose a date row."}, 400)
+            return
+        review = _review(payload.get("review"))
+        if not review:
+            self.send_json({"ok": False, "error": "Choose agree, don't agree, or unsure."}, 400)
+            return
+        path = OUT / "layer5_dates.json"
+        current = read_json(path)
+        dates = current.get("dates") if isinstance(current, dict) else None
+        if not isinstance(dates, list) or not 0 <= index < len(dates) or not isinstance(dates[index], dict):
+            self.send_json({"ok": False, "error": "There is no date row to mark."}, 400)
+            return
+        dates[index]["review"] = review
+        path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.send_json({"ok": True})
+
     def save_layer6(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0 or length > 200_000:
@@ -324,18 +382,22 @@ class Handler(BaseHTTPRequestHandler):
                 "arrival_country": arrival,
                 "start": str(item.get("start") or ""),
                 "end": str(item.get("end") or ""),
+                "review": _review(item.get("review")),
             })
         formatted = format_stay_fields(
             [value for draft in drafts for value in (draft["start"], draft["end"])]
         )
         stays = []
         for index, draft in enumerate(drafts):
-            stays.append({
+            stay = {
                 "departure_country": draft["departure_country"],
                 "arrival_country": draft["arrival_country"],
                 "start": formatted[index * 2][:200],
                 "end": formatted[index * 2 + 1][:200],
-            })
+            }
+            if draft["review"]:
+                stay["review"] = draft["review"]
+            stays.append(stay)
         current = read_json(OUT / "layer6_stays.json") or {}
         document = {
             "layer": 6,
