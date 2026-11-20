@@ -2,7 +2,7 @@
 
 ## About
 
-Passport Extractor reads a Malaysian passport on this computer and shows the result in a browser. A biodata page produces the holder’s name, the printed details, and a portrait. A stamp page produces each immigration or visa seal, the dates on those seals, and the stays built from those dates.
+Passport Extractor reads a Malaysian passport on this computer and shows the result in a browser. A biodata page produces the holder’s name, the printed details, and a portrait. A stamp page produces each immigration or visa seal, the dates on those seals, the stays built from those dates, and a short summary of the travels.
 
 The two kinds of page stay separate. A biodata page is not searched for seals, and a stamp page is not treated as the holder page. Uploads and results remain on this machine. The repository does not contain passport scans or an API key.
 
@@ -52,10 +52,11 @@ You can also run the extractor on its own:
 | 4 | Stamps | Each seal, with the country and the stamp text |
 | 5 | Stamps | Country, date, and whether that date is an arrival, a departure, a visa duration, or unknown |
 | 6 | Stamps | Stays: departure country, arrival country, start date, and end date |
+| 7 | Stamps | One paragraph summarizing every stay, using the name from Layer 1 |
 
-Empty layers are omitted. Dates are written as `DD MON YYYY`, for example `16 FEB 1936`.
+Empty layers are omitted. Dates are written as `DD MON YYYY`, for example `16 FEB 1936`. A printed year is kept. If the other dates on the same page agree, and one date is 30 years or more away from that year, that one date is brought into line. A nearby year, such as 1980 beside 1970, is left as read.
 
-On a stamp page you can correct a seal or a stay, and you can add a stay. **Page** opens the uploaded page that seal was cut from. Each date and each stay can be marked **Agree**, **Don't agree**, or **Unsure**. For this passport, departure and arrival cannot both be Malaysia. An end date cannot be earlier than the start date.
+On a stamp page you can correct a seal, a date, or the countries of a stay, and you can add a stay. Stay dates are kept when the countries are edited. **Page** opens the uploaded page with a box around that seal. In Layer 4, a seal card on the left or in the middle opens the page on the right; a card in the right column opens it on the left. Each date and each stay can be marked **Agree**, **Don't agree**, or **Unsure**. For this passport, departure and arrival cannot both be Malaysia. Layer 7 is written on this computer from the stays. It does not call a model.
 
 ## Models
 
@@ -67,8 +68,9 @@ On a stamp page you can correct a seal or a stay, and you can add a stay. **Page
 | Second reading of a seal | `z-ai/glm-5.3-flashx` |
 | Date type and stays | `qwen/qwen3-vl-8b-instruct` |
 | Portrait | YuNet, from `models/face_detection_yunet.onnx` |
+| Travel summary | None. Written on this computer from the stays and the Layer 1 name |
 
-The portrait is found on this machine. It is not sent as a separate request.
+The portrait is found on this machine. It is not sent as a separate request. The box around a seal is also found on this machine, by matching the seal crop to the uploaded page.
 
 ## Layout
 
