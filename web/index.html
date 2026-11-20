@@ -45,10 +45,33 @@
   </dialog>
   <dialog id="page-view" aria-labelledby="page-title">
     <p id="page-title">Page</p>
-    <img id="page-photo" alt="Passport page the stamp was read from">
+    <div id="page-frame">
+      <img id="page-photo" alt="Passport page the stamp was read from">
+      <div id="page-box" hidden></div>
+    </div>
     <div class="dialog-actions">
       <button type="button" id="page-close">Close</button>
     </div>
+  </dialog>
+  <dialog id="date-editor" aria-labelledby="date-title">
+    <form id="date-form" method="post" action="/api/layer5">
+      <p id="date-title">Edit date</p>
+      <label for="date-country">Country</label>
+      <input id="date-country" name="country" autocomplete="off" maxlength="200">
+      <label for="date-value">Date</label>
+      <input id="date-value" name="date" type="date" min="1940-01-01" max="2029-12-31" autocomplete="off">
+      <label for="date-type">Type</label>
+      <select id="date-type" name="type">
+        <option value="arrival">Arrival</option>
+        <option value="departure">Departure</option>
+        <option value="visa duration">Visa duration</option>
+        <option value="unknown">Unknown</option>
+      </select>
+      <div class="dialog-actions">
+        <button type="submit">Save</button>
+        <button type="button" id="date-cancel">Cancel</button>
+      </div>
+    </form>
   </dialog>
   <dialog id="stay-editor" aria-labelledby="stay-title">
     <form id="stay-form" method="post" action="/api/layer6">
@@ -57,16 +80,6 @@
       <input id="departure-country" name="departure_country" autocomplete="off" maxlength="200">
       <label for="arrival-country">Arrival country</label>
       <input id="arrival-country" name="arrival_country" autocomplete="off" maxlength="200">
-      <div class="date-pair">
-        <div>
-          <label for="start-date">Start date</label>
-          <input id="start-date" name="start" type="date" min="1980-01-01" max="2029-12-31" autocomplete="off">
-        </div>
-        <div>
-          <label for="end-date">End date</label>
-          <input id="end-date" name="end" type="date" min="1980-01-01" max="2029-12-31" autocomplete="off">
-        </div>
-      </div>
       <div class="dialog-actions">
         <button type="submit">Save</button>
         <button type="button" id="stay-cancel">Cancel</button>

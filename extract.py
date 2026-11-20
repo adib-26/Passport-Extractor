@@ -2,7 +2,7 @@
 """Extract a Malaysian passport.
 
 A biodata page yields the holder name, printed details, and portrait.
-A stamp page yields the seals, the dates on those seals, and the stays.
+A stamp page yields the seals, the dates on those seals, the stays, and a travel summary.
 """
 
 from __future__ import annotations
@@ -2159,6 +2159,83 @@ def _cut_upright(client: OpenRouter, page: np.ndarray, box: tuple[int, int, int,
     return again
 
 
+def _stamp_on_page(page: np.ndarray, crop: np.ndarray) -> list[float] | None:
+    """Where this one stamp sits on the uploaded page, as fractions of that page."""
+    if page is None or crop is None or page.size == 0 or crop.size == 0:
+        return None
+    detector = cv2.SIFT_create()
+    page_gray = cv2.cvtColor(page, cv2.COLOR_BGR2GRAY)
+    crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    crop_keys, crop_desc = detector.detectAndCompute(crop_gray, None)
+    page_keys, page_desc = detector.detectAndCompute(page_gray, None)
+    if crop_desc is None or page_desc is None or len(crop_keys) < 8:
+        return None
+    pairs = cv2.BFMatcher(cv2.NORM_L2).knnMatch(crop_desc, page_desc, k=2)
+    good = []
+    for pair in pairs:
+        if len(pair) < 2:
+            continue
+        first, second = pair
+        if first.distance < 0.75 * second.distance:
+            good.append(first)
+    if len(good) < 8:
+        return None
+    source = np.float32([crop_keys[item.queryIdx].pt for item in good]).reshape(-1, 1, 2)
+    target = np.float32([page_keys[item.trainIdx].pt for item in good]).reshape(-1, 1, 2)
+    homography, _mask = cv2.findHomography(source, target, cv2.RANSAC, 4.0)
+    if homography is None:
+        return None
+    height, width = crop_gray.shape
+    corners = np.float32([[0, 0], [width, 0], [width, height], [0, height]]).reshape(-1, 1, 2)
+    warped = cv2.perspectiveTransform(corners, homography)
+    page_h, page_w = page.shape[:2]
+    x0 = max(0, int(np.min(warped[:, 0, 0])))
+    y0 = max(0, int(np.min(warped[:, 0, 1])))
+    x1 = min(page_w, int(np.max(warped[:, 0, 0])))
+    y1 = min(page_h, int(np.max(warped[:, 0, 1])))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    return [x0 / page_w, y0 / page_h, (x1 - x0) / page_w, (y1 - y0) / page_h]
+
+
+def _separate_stamp_boxes(boxes: list[list[float] | None]) -> list[list[float] | None]:
+    """Pull overlapping boxes apart so one stamp's box does not cover the next stamp."""
+    placed = [list(box) if box else None for box in boxes]
+    for _pass in range(4):
+        for left in range(len(placed)):
+            for right in range(left + 1, len(placed)):
+                a, b = placed[left], placed[right]
+                if not a or not b:
+                    continue
+                ax, ay, aw, ah = a
+                bx, by, bw, bh = b
+                ix0, iy0 = max(ax, bx), max(ay, by)
+                ix1, iy1 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+                if ix1 - ix0 < 0.005 or iy1 - iy0 < 0.005:
+                    continue
+                if (ix1 - ix0) >= (iy1 - iy0):
+                    mid = (iy0 + iy1) / 2
+                    if ay <= by:
+                        a[3] = max(0.02, mid - ay)
+                        b[1] = mid
+                        b[3] = max(0.02, by + bh - mid)
+                    else:
+                        b[3] = max(0.02, mid - by)
+                        a[1] = mid
+                        a[3] = max(0.02, ay + ah - mid)
+                else:
+                    mid = (ix0 + ix1) / 2
+                    if ax <= bx:
+                        a[2] = max(0.02, mid - ax)
+                        b[0] = mid
+                        b[2] = max(0.02, bx + bw - mid)
+                    else:
+                        b[2] = max(0.02, mid - bx)
+                        a[0] = mid
+                        a[2] = max(0.02, ax + aw - mid)
+    return placed
+
+
 def _page_seals(client: OpenRouter, page: np.ndarray) -> list[np.ndarray]:
     boxes = _found_seals(client, page)
     with ThreadPoolExecutor(max_workers=SEAL_WORKERS) as pool:
@@ -2432,8 +2509,18 @@ def layer4(pages: list[dict], client: OpenRouter, out_dir: Path | None = None, s
                 continue
             name = f"{len(images) + 1}.jpg"
             cv2.imwrite(str(seal_dir / name), piece, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-            images.append({"file": f"seals/{name}", "text": text, "country": country, "page": page_no})
+            seal = {"file": f"seals/{name}", "text": text, "country": country, "page": page_no}
+            box = _stamp_on_page(shown, piece)
+            if box:
+                seal["box"] = [round(value, 4) for value in box]
+            images.append(seal)
             print(f"[Layer 4] {name}: {country or ''} {text}", flush=True)
+        fresh = images[page_start:]
+        for seal, box in zip(fresh, _separate_stamp_boxes([item.get("box") for item in fresh])):
+            if box:
+                seal["box"] = [round(value, 4) for value in box]
+            else:
+                seal.pop("box", None)
         for stale in range(len(images) + 1, page_start + len(pieces) + 1):
             (seal_dir / f"{stale}.jpg").unlink(missing_ok=True)
         _write_seals(stays_path, images, "running", source)
@@ -2447,6 +2534,14 @@ def layer4(pages: list[dict], client: OpenRouter, out_dir: Path | None = None, s
 
     events, stays = _layer2(client, images, on_events=publish_dates)
     _write_layer6(folder / "layer6_stays.json", stays, source)
+    holder_name = ""
+    layer1_path = folder / "layer1_name.json"
+    if layer1_path.is_file():
+        try:
+            holder_name = str(json.loads(layer1_path.read_text(encoding="utf-8")).get("name") or "")
+        except (OSError, json.JSONDecodeError):
+            holder_name = ""
+    write_layer7(folder / "layer7_travels.json", stays, source, holder_name)
     return document
 
 
@@ -2512,11 +2607,6 @@ def _date_parts(text: str) -> list[dict]:
     return parts
 
 
-# A stamp year is never older than 1980. When one is, its third digit is taken
-# from the other dates: 8 or 9 keeps the 1980s or 1990s, and 0, 1, or 2 means 2000–2029.
-_YEAR_THIRD_DIGITS = (8, 9, 0, 1, 2)
-
-
 def _year_from_text(year_text: str, full_years: set[int]) -> int | None:
     if len(year_text) == 4:
         year = int(year_text)
@@ -2530,41 +2620,32 @@ def _year_from_text(year_text: str, full_years: set[int]) -> int | None:
         year = 1900 + number if number >= 40 else 2000 + number
     else:
         return None
-    if 1940 <= year <= 2035:
+    if 1900 <= year <= 2035:
         return year
     return None
 
 
-def _third_digit(year: int) -> int:
-    return (year // 10) % 10
-
-
-def _predict_third_digit(years: list[int]) -> int:
-    """Pick 8, 9, 0, 1, or 2 from the dates that are already 1980 or later."""
-    counts = {digit: 0 for digit in _YEAR_THIRD_DIGITS}
-    for year in years:
-        if year < 1980:
-            continue
-        digit = _third_digit(year)
-        if digit in counts:
-            counts[digit] += 1
-    best = max(counts.values())
-    if best:
-        for digit in _YEAR_THIRD_DIGITS:
-            if counts[digit] == best:
-                return digit
-    return 8
-
-
 def _lift_year(year: int | None, years: list[int]) -> int | None:
-    """Replace a year older than 1980, keeping its last digit."""
-    if year is None or year >= 1980:
+    """Follow the year the rest of the page agrees on when this one date is 30 years away or more.
+
+    A page of 1970 dates with one 1920 becomes 1970. A nearby year, such as 1980 beside 1970, stays as read.
+    """
+    if year is None:
+        return None
+    counts: dict[int, int] = {}
+    for value in years:
+        counts[value] = counts.get(value, 0) + 1
+    if not counts:
         return year
-    digit = _predict_third_digit(years)
-    last = year % 10
-    if digit in {8, 9}:
-        return 1900 + digit * 10 + last
-    return 2000 + digit * 10 + last
+    common = max(counts, key=lambda value: (counts[value], -value))
+    others = [count for value, count in counts.items() if value != common]
+    if counts[common] < 2 or (others and counts[common] <= max(others)):
+        return year
+    if year == common:
+        return year
+    if counts.get(year, 0) == 1 and abs(year - common) >= 30:
+        return common
+    return year
 
 
 def _repair_month_letters(text: str) -> str:
@@ -2676,37 +2757,37 @@ def format_stay_date(value, page_years: list[int] | None = None) -> str:
 
 
 def format_stay_fields(values: list[str]) -> list[str]:
-    """Format every stay date, using the other dates to repair a year before 1980."""
+    """Format every stay date as DD MON YYYY."""
     page_years: list[int] = []
     for value in values:
         page_years.extend(_resolved_years(str(value or "")))
     return [format_stay_date(value, page_years) for value in values]
 
 
-def _seal_date_context(seals: list[dict]) -> tuple[dict[str, set[int]], list[int]]:
+def _seal_date_context(seals: list[dict]) -> tuple[dict[str, set[int]], dict[object, list[int]]]:
     years: dict[str, set[int]] = {}
-    keyed: list[tuple[str, str]] = []
+    keyed: list[tuple[object, str, str]] = []
     for stamp, seal in enumerate(seals, start=1):
         country = _stay_field(seal.get("country"))
         key = country.casefold() or f"unknown-{stamp}"
         text = str(seal.get("text") or "")
-        keyed.append((key, text))
+        keyed.append((seal.get("page"), key, text))
         for part in _date_parts(text):
             if len(part["year_text"]) == 4:
                 years.setdefault(key, set()).add(int(part["year_text"]))
-    page_years: list[int] = []
-    for key, text in keyed:
-        page_years.extend(_resolved_years(text, years.get(key, set())))
-    return years, page_years
+    by_page: dict[object, list[int]] = {}
+    for page, key, text in keyed:
+        by_page.setdefault(page, []).extend(_resolved_years(text, years.get(key, set())))
+    return years, by_page
 
 
 def _unify_seal_dates(seals: list[dict]) -> None:
     """Write every date inside a seal reading as DD MON YYYY."""
-    years, page_years = _seal_date_context(seals)
+    years, by_page = _seal_date_context(seals)
     for stamp, seal in enumerate(seals, start=1):
         country = _stay_field(seal.get("country"))
         key = country.casefold() or f"unknown-{stamp}"
-        seal["text"] = _rewrite_dates(str(seal.get("text") or ""), years.get(key, set()), page_years)
+        seal["text"] = _rewrite_dates(str(seal.get("text") or ""), years.get(key, set()), by_page.get(seal.get("page"), []))
 
 
 def _dated_events(seals: list[dict]) -> list[dict]:
@@ -2725,6 +2806,7 @@ def _dated_events(seals: list[dict]) -> list[dict]:
                 "stamp": stamp,
                 "file": str(seal.get("file") or f"seals/{stamp}.jpg"),
                 "page": seal.get("page"),
+                "box": seal.get("box"),
                 "country": country,
                 "key": key,
                 "text": str(seal.get("text") or "").strip(),
@@ -2734,12 +2816,15 @@ def _dated_events(seals: list[dict]) -> list[dict]:
         (item, _year_from_text(item["year_text"], full_years.get(item["key"], set())))
         for item in raw
     ]
-    page_years = [year for _item, year in resolved if year]
+    by_page: dict[object, list[int]] = {}
+    for item, year in resolved:
+        if year:
+            by_page.setdefault(item.get("page"), []).append(year)
     events = []
     for item, year in resolved:
-        year = _lift_year(year, page_years)
+        year = _lift_year(year, by_page.get(item.get("page"), []))
         when = None
-        if year and 1940 <= year <= 2035:
+        if year and 1900 <= year <= 2035:
             try:
                 when = date(year, item["month"], item["day"])
             except ValueError:
@@ -2750,6 +2835,7 @@ def _dated_events(seals: list[dict]) -> list[dict]:
             "stamp": item["stamp"],
             "file": item["file"],
             "page": item.get("page"),
+            "box": item.get("box"),
             "country": item["country"],
             "key": item["key"],
             "date": label,
@@ -2855,6 +2941,7 @@ def _date_rows(events: list[dict]) -> list[dict]:
             "type": event["role"],
             "file": event.get("file") or "",
             "page": event.get("page"),
+            "box": event.get("box"),
         }
         for event in ordered
     ]
@@ -2885,6 +2972,78 @@ def _write_layer6(path: Path, stays: list[dict], source: str = "") -> dict:
     path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
     return document
 
+
+def _join_names(names: list[str]) -> str:
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return f"{', '.join(names[:-1])}, and {names[-1]}"
+
+
+def _count_word(count: int) -> str:
+    words = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+    return words[count] if count < len(words) else str(count)
+
+
+def _travel_sentence(stay: dict, name: str) -> str:
+    departure = _stay_field(stay.get("departure_country"))
+    arrival = _stay_field(stay.get("arrival_country"))
+    start = _stay_field(stay.get("start"))
+    end = _stay_field(stay.get("end"))
+    who = name or "The passport"
+    if departure and arrival:
+        movement = f"{who} left {departure} for {arrival}"
+    elif arrival:
+        movement = f"{who} travelled to {arrival}"
+    elif departure:
+        movement = f"{who} left {departure}"
+    else:
+        movement = f"{who} has one stay with no country on the stamps"
+    if start and end and start == end:
+        return f"{movement} on {start}, and that stay ends the same day."
+    if start and end:
+        return f"{movement} and stayed from {start} until {end}."
+    if start:
+        return f"{movement} on {start}. The stamps do not show when that stay ended."
+    if end:
+        return f"{movement}. The stamps show that stay ending on {end}."
+    return f"{movement}. The stamps do not show the dates."
+
+
+def travel_summary(stays: list[dict], name: str = "") -> dict:
+    """One paragraph covering every stay, rather than a second copy of the stay list."""
+    usable = [stay for stay in stays if isinstance(stay, dict)]
+    countries = []
+    seen: set[str] = set()
+    for stay in usable:
+        arrival = _stay_field(stay.get("arrival_country"))
+        key = arrival.casefold()
+        if arrival and key not in seen:
+            seen.add(key)
+            countries.append(arrival)
+    count = len(usable)
+    if count == 0:
+        summary = "No travels were read from the stamps."
+    else:
+        noun = "travel" if count == 1 else "travels"
+        where = f", to {_join_names(countries)}" if countries else ""
+        opening = f"The stamps record {_count_word(count)} {noun}{where}."
+        summary = " ".join([opening, *(_travel_sentence(stay, _stay_field(name)) for stay in usable)])
+    return {"trips": count, "countries": countries, "summary": summary}
+
+
+def write_layer7(path: Path, stays: list[dict], source: str = "", name: str = "") -> dict:
+    _refuse_saved(path.parent)
+    document = {
+        "layer": 7,
+        "status": "finished",
+        "source": source,
+        **travel_summary(stays, name),
+    }
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[Layer 7] {document['trips']} travels", flush=True)
+    return document
 
 
 def portrait_crop(image: np.ndarray) -> np.ndarray | None:
@@ -2964,7 +3123,7 @@ def _run_identity(client: OpenRouter, pages: list[dict], biodata_pages: list[dic
 
 
 def _run_seals(client: OpenRouter, seal_pages: list[dict], out_dir: Path, source_name: str) -> None:
-    """Layers 4–6. Dates are classified only after every seal text has been settled."""
+    """Layers 4–7. Dates are classified only after every seal text has been settled."""
     if not seal_pages:
         print("[Layer 4] biodata page, seals not read", flush=True)
         return
@@ -2995,6 +3154,7 @@ def run(source: Path, secrets_path: Path, out_dir: Path) -> None:
         "layer_dates.json",
         "layer5_dates.json",
         "layer6_stays.json",
+        "layer7_travels.json",
         "layer4_stays.json",
         "portrait.jpg",
     ):

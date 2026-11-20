@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from extract import format_stay_fields
+from extract import write_layer7
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -93,6 +93,7 @@ def snapshot() -> dict:
         "layer3": current(read_json(OUT / "layer3_image.json"), file_mtime("layer3_image.json")),
         "layer5": current(read_json(OUT / "layer5_dates.json"), file_mtime("layer5_dates.json")),
         "layer6": current(read_json(OUT / "layer6_stays.json"), file_mtime("layer6_stays.json")),
+        "layer7": current(read_json(OUT / "layer7_travels.json"), file_mtime("layer7_travels.json")),
         "saved": saved,
     }
 
@@ -341,17 +342,38 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             self.send_json({"ok": False, "error": "Choose a date row."}, 400)
             return
-        review = _review(payload.get("review"))
-        if not review:
-            self.send_json({"ok": False, "error": "Choose agree, don't agree, or unsure."}, 400)
-            return
         path = OUT / "layer5_dates.json"
         current = read_json(path)
         dates = current.get("dates") if isinstance(current, dict) else None
         if not isinstance(dates, list) or not 0 <= index < len(dates) or not isinstance(dates[index], dict):
-            self.send_json({"ok": False, "error": "There is no date row to mark."}, 400)
+            self.send_json({"ok": False, "error": "There is no date row to edit."}, 400)
             return
-        dates[index]["review"] = review
+        row = dates[index]
+        editing = any(key in payload for key in ("country", "date", "type"))
+        if editing:
+            country = str(payload.get("country") or "").strip()[:200]
+            date = str(payload.get("date") or "").strip()
+            kind = str(payload.get("type") or "").strip().lower()
+            if kind not in {"arrival", "departure", "visa duration", "unknown"}:
+                self.send_json({"ok": False, "error": "Choose arrival, departure, visa duration, or unknown."}, 400)
+                return
+            if date and not re.fullmatch(r"\d{2} (?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC) (?:194\d|195\d|196\d|197\d|198\d|199\d|200\d|201\d|202\d)", date):
+                self.send_json({"ok": False, "error": "Use a date from 1940 through 2029."}, 400)
+                return
+            row["country"] = country
+            row["date"] = date
+            row["type"] = kind
+            review = _review(payload.get("review"))
+            if review:
+                row["review"] = review
+            elif "review" in payload:
+                row.pop("review", None)
+        else:
+            review = _review(payload.get("review"))
+            if not review:
+                self.send_json({"ok": False, "error": "Choose agree, don't agree, or unsure."}, 400)
+                return
+            row["review"] = review
         path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
         self.send_json({"ok": True})
 
@@ -369,36 +391,35 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(raw, list) or len(raw) > 100:
             self.send_json({"ok": False, "error": "Send the list of stays."}, 400)
             return
+        current = read_json(OUT / "layer6_stays.json") or {}
+        existing = current.get("stays") if isinstance(current.get("stays"), list) else []
         drafts = []
-        for item in raw:
+        for index, item in enumerate(raw):
             if not isinstance(item, dict):
                 continue
             departure = str(item.get("departure_country") or "").strip()[:200]
             arrival = str(item.get("arrival_country") or "").strip()[:200]
             if departure.casefold() == "malaysia" and arrival.casefold() == "malaysia":
                 departure = ""
+            stored = existing[index] if index < len(existing) and isinstance(existing[index], dict) else {}
             drafts.append({
                 "departure_country": departure,
                 "arrival_country": arrival,
-                "start": str(item.get("start") or ""),
-                "end": str(item.get("end") or ""),
+                "start": str(stored.get("start") or ""),
+                "end": str(stored.get("end") or ""),
                 "review": _review(item.get("review")),
             })
-        formatted = format_stay_fields(
-            [value for draft in drafts for value in (draft["start"], draft["end"])]
-        )
         stays = []
-        for index, draft in enumerate(drafts):
+        for draft in drafts:
             stay = {
                 "departure_country": draft["departure_country"],
                 "arrival_country": draft["arrival_country"],
-                "start": formatted[index * 2][:200],
-                "end": formatted[index * 2 + 1][:200],
+                "start": draft["start"][:200],
+                "end": draft["end"][:200],
             }
             if draft["review"]:
                 stay["review"] = draft["review"]
             stays.append(stay)
-        current = read_json(OUT / "layer6_stays.json") or {}
         document = {
             "layer": 6,
             "status": "finished",
@@ -410,6 +431,13 @@ class Handler(BaseHTTPRequestHandler):
         (OUT / "layer6_stays.json").write_text(
             json.dumps(document, ensure_ascii=False, indent=2),
             encoding="utf-8",
+        )
+        layer1 = read_json(OUT / "layer1_name.json") or {}
+        write_layer7(
+            OUT / "layer7_travels.json",
+            stays,
+            str(document.get("source") or ""),
+            str(layer1.get("name") or ""),
         )
         self.send_json({"ok": True})
 

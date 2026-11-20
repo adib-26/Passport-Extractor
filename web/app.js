@@ -62,7 +62,12 @@ function galleryFor(layer4, prefix) {
         pageButton.type = "button";
         pageButton.className = "seal-edit";
         pageButton.textContent = "Page";
-        pageButton.addEventListener("click", () => openPage(page));
+        pageButton.addEventListener("click", () => {
+          const gallery = figure.parentElement.getBoundingClientRect();
+          const card = figure.getBoundingClientRect();
+          const across = gallery.width ? (card.left + card.width / 2 - gallery.left) / gallery.width : 0;
+          openPage(page, seal.box, across > 0.66 ? "left" : "right");
+        });
         actions.append(pageButton);
       }
       const button = document.createElement("button");
@@ -255,10 +260,15 @@ function datesFor(layer) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = "Page";
-      button.addEventListener("click", () => openPage(page));
+      button.addEventListener("click", () => openPage(page, row.box));
       actions.append(button);
     }
-    if (actions.childElementCount) article.append(actions);
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => openDate(row));
+    actions.append(edit);
+    article.append(actions);
     article.append(verdictGroup("Does this date look right?", fieldText(row, "review"), (review) => {
       postJson("/api/layer5", { index: row.index, review });
     }));
@@ -280,16 +290,85 @@ const pagePhoto = document.querySelector("#page-photo");
 const pageTitle = document.querySelector("#page-title");
 document.querySelector("#page-close").addEventListener("click", () => pageDialog.close());
 
-function openStamp(file) {
-  stampPhoto.src = `/${file}`;
-  stampDialog.showModal();
+function placeBesideLayer5(dialog, side) {
+  const place = () => {
+    const heading = [...document.querySelectorAll("#results h2")].find((item) => item.textContent.startsWith("Layer 5"));
+    const card = heading ? heading.closest("section") : document.querySelector("main");
+    const box = card.getBoundingClientRect();
+    const gap = 16;
+    const width = dialog.offsetWidth || 352;
+    let left = side === "left" ? box.left - gap - width : box.right + gap;
+    if (left < gap) left = box.right + gap;
+    if (left + width > window.innerWidth - gap) left = window.innerWidth - width - gap;
+    const room = window.innerHeight - gap * 2;
+    let top = Math.max(gap, box.top);
+    if (top > window.innerHeight - gap - 240) top = Math.max(gap, window.innerHeight - gap - Math.min(room, 720));
+    dialog.style.top = `${top}px`;
+    dialog.style.maxHeight = `${Math.max(240, window.innerHeight - top - gap)}px`;
+    dialog.style.left = `${Math.max(gap, left)}px`;
+    dialog.style.right = "auto";
+    dialog.style.bottom = "auto";
+  };
+  dialog.showModal();
+  place();
+  const photo = dialog.querySelector("img");
+  if (photo && !photo.complete) photo.addEventListener("load", place, { once: true });
 }
 
-function openPage(number) {
+function openStamp(file) {
+  stampPhoto.src = `/${file}`;
+  placeBesideLayer5(stampDialog);
+}
+
+const dateDialog = document.querySelector("#date-editor");
+const dateForm = document.querySelector("#date-form");
+let editingDate = null;
+document.querySelector("#date-cancel").addEventListener("click", () => dateDialog.close());
+
+function openDate(row) {
+  editingDate = row;
+  dateForm.elements.country.value = fieldText(row, "country");
+  dateForm.elements.date.value = toDateInput(fieldText(row, "date"));
+  const type = fieldText(row, "type").toLowerCase();
+  dateForm.elements.type.value = Object.hasOwn(DATE_TYPES, type) ? type : "unknown";
+  dateDialog.showModal();
+}
+
+dateForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!editingDate) return;
+  const saved = await postJson("/api/layer5", {
+    index: editingDate.index,
+    country: dateForm.elements.country.value.trim(),
+    date: fromDateInput(dateForm.elements.date.value),
+    type: dateForm.elements.type.value,
+    review: fieldText(editingDate, "review"),
+  });
+  if (saved) dateDialog.close();
+});
+
+const pageBox = document.querySelector("#page-box");
+
+function showPageBox(box) {
+  const values = Array.isArray(box) ? box.map(Number) : [];
+  if (values.length !== 4 || values.some((value) => !Number.isFinite(value))) {
+    pageBox.hidden = true;
+    return;
+  }
+  const [x, y, width, height] = values;
+  pageBox.hidden = false;
+  pageBox.style.left = `${x * 100}%`;
+  pageBox.style.top = `${y * 100}%`;
+  pageBox.style.width = `${width * 100}%`;
+  pageBox.style.height = `${height * 100}%`;
+}
+
+function openPage(number, box, side) {
   pageTitle.textContent = `Page ${number}`;
   pagePhoto.alt = `Passport page ${number}`;
+  showPageBox(box);
   pagePhoto.src = `/pages/${number}.jpg`;
-  pageDialog.showModal();
+  placeBesideLayer5(pageDialog, side === "left" ? "left" : "right");
 }
 
 function staysFor(layer2) {
@@ -357,8 +436,6 @@ function openStay(index) {
   document.querySelector("#stay-title").textContent = "Edit stay";
   stayForm.elements.departure_country.value = stay.departure_country;
   stayForm.elements.arrival_country.value = stay.arrival_country;
-  stayForm.elements.start.value = toDateInput(stay.start);
-  stayForm.elements.end.value = toDateInput(stay.end);
   stayDialog.showModal();
 }
 
@@ -374,22 +451,15 @@ stayCancel.addEventListener("click", () => stayDialog.close());
 stayForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (editing < 0 || editing > stays.length) return;
-  const startValue = stayForm.elements.start.value;
-  const endValue = stayForm.elements.end.value;
-  if (startValue && endValue && endValue < startValue) {
-    stayForm.elements.end.setCustomValidity("The end date cannot be earlier than the start date.");
-    stayForm.reportValidity();
-    stayForm.elements.end.setCustomValidity("");
-    return;
-  }
   if (!stayForm.reportValidity()) return;
   const next = stays.map((stay) => ({ ...stay }));
+  const existing = editing < stays.length ? stays[editing] : null;
   const draft = {
     departure_country: stayForm.elements.departure_country.value.trim(),
     arrival_country: stayForm.elements.arrival_country.value.trim(),
-    start: fromDateInput(startValue),
-    end: fromDateInput(endValue),
-    review: editing < stays.length ? stays[editing].review : "",
+    start: existing ? existing.start : "",
+    end: existing ? existing.end : "",
+    review: existing ? existing.review : "",
   };
   if (editing === stays.length) next.push(draft);
   else next[editing] = draft;
@@ -432,7 +502,7 @@ function appendIdentity(data, parent) {
   if (name) {
     const body = document.createElement("p");
     body.append(text(name));
-    parent.append(card("Layer 1", body));
+    parent.append(card("Layer 1 · Name", body));
   }
   const attributes = data.layer2 && data.layer2.attributes;
   const fields = attributes ? Object.entries(attributes).filter(([, value]) => String(value || "").trim()) : [];
@@ -445,14 +515,14 @@ function appendIdentity(data, parent) {
       detail.append(text(value));
       list.append(term, detail);
     }
-    parent.append(card("Layer 2", list));
+    parent.append(card("Layer 2 · Details", list));
   }
   if (data.layer3 && data.layer3.image === "portrait.jpg") {
     const photo = document.createElement("img");
     photo.className = "portrait";
     photo.alt = "Passport portrait";
     photo.src = "/portrait.jpg";
-    parent.append(card("Layer 3", photo));
+    parent.append(card("Layer 3 · Portrait", photo));
   }
 }
 
@@ -496,7 +566,7 @@ function render(data) {
       country: String(seal.country || ""),
     }));
     const name = layer4.source || data.source || "This passport";
-    results.append(card(`Layer 4 · ${name} · ${sealCount(layer4)}`, galleryFor(layer4, "/")));
+    results.append(card(`Layer 4 · Seals · ${name} · ${sealCount(layer4)}`, galleryFor(layer4, "/")));
   } else if (layer4 && layer4.status === "running") {
     const note = document.createElement("p");
     note.className = "empty";
@@ -505,11 +575,23 @@ function render(data) {
   }
 
   if (data.layer5 && Array.isArray(data.layer5.dates)) {
-    results.append(card("Layer 5", datesFor(data.layer5)));
+    results.append(card("Layer 5 · Dates", datesFor(data.layer5)));
   }
   if (data.layer6 && Array.isArray(data.layer6.stays)) {
-    results.append(card("Layer 6", staysFor(data.layer6)));
+    results.append(card("Layer 6 · Stays", staysFor(data.layer6)));
   }
+  if (data.layer7 && data.layer7.summary) {
+    results.append(card("Layer 7 · Travels", travelsFor(data.layer7)));
+  }
+}
+
+function travelsFor(layer) {
+  const wrap = document.createElement("div");
+  wrap.className = "travels";
+  const lead = document.createElement("p");
+  lead.append(text(String(layer.summary || "")));
+  wrap.append(lead);
+  return wrap;
 }
 
 async function refresh() {
