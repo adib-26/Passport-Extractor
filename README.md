@@ -56,7 +56,7 @@ You can also run the extractor on its own:
 
 Empty layers are omitted. Dates are written as `DD MON YYYY`, for example `16 FEB 1936`. A printed year is kept. If the other dates on the same page agree, and one date is 30 years or more away from that year, that one date is brought into line. A nearby year, such as 1980 beside 1970, is left as read.
 
-On a stamp page you can correct a seal, a date, or the countries of a stay, and you can add a stay. Stay dates are kept when the countries are edited. **Page** opens the uploaded page with a box around that seal. In Layer 4, a seal card on the left or in the middle opens the page on the right; a card in the right column opens it on the left. Each date and each stay can be marked **Agree**, **Don't agree**, or **Unsure**. For this passport, departure and arrival cannot both be Malaysia. Layer 7 is written on this computer from the stays. It does not call a model.
+On a stamp page you can correct a seal, a date, or a stay, and you can add a stay. A stay edit includes the countries and the start and end dates. **Exit stamp** and **Entry stamp** open the departure and arrival stamps for that stay. **Page** opens the uploaded page with a box around that seal. In Layer 4, a seal card on the left or in the middle opens the page on the right; a card in the right column opens it on the left. Each date and each stay can be marked **Agree**, **Don't agree**, or **Unsure**. For this passport, departure and arrival cannot both be Malaysia. Layer 7 is written on this computer from the stays. It does not call a model.
 
 ## Models
 

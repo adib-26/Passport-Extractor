@@ -33,6 +33,34 @@ def _review(value) -> str:
     return text if text in REVIEWS else ""
 
 
+def _stay_date(value) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"\d{2} (?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC) (?:194\d|195\d|196\d|197\d|198\d|199\d|200\d|201\d|202\d)", text):
+        return text
+    return None
+
+
+def _stamp_kept(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    file = str(value.get("file") or "")
+    if not re.fullmatch(r"seals/\d+\.jpg", file):
+        return None
+    stamp = {"file": file}
+    try:
+        page = int(value.get("page"))
+    except (TypeError, ValueError):
+        page = 0
+    if page > 0:
+        stamp["page"] = page
+    box = value.get("box")
+    if isinstance(box, list) and len(box) == 4:
+        stamp["box"] = box
+    return stamp
+
+
 ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
 FILES = {
@@ -402,12 +430,19 @@ class Handler(BaseHTTPRequestHandler):
             if departure.casefold() == "malaysia" and arrival.casefold() == "malaysia":
                 departure = ""
             stored = existing[index] if index < len(existing) and isinstance(existing[index], dict) else {}
+            start = _stay_date(item.get("start") if "start" in item else stored.get("start"))
+            end = _stay_date(item.get("end") if "end" in item else stored.get("end"))
+            if start is None or end is None:
+                self.send_json({"ok": False, "error": "Use a date from 1940 through 2029."}, 400)
+                return
             drafts.append({
                 "departure_country": departure,
                 "arrival_country": arrival,
-                "start": str(stored.get("start") or ""),
-                "end": str(stored.get("end") or ""),
+                "start": start,
+                "end": end,
                 "review": _review(item.get("review")),
+                "exit": _stamp_kept(stored.get("exit")),
+                "entry": _stamp_kept(stored.get("entry")),
             })
         stays = []
         for draft in drafts:
@@ -417,6 +452,10 @@ class Handler(BaseHTTPRequestHandler):
                 "start": draft["start"][:200],
                 "end": draft["end"][:200],
             }
+            if draft["exit"]:
+                stay["exit"] = draft["exit"]
+            if draft["entry"]:
+                stay["entry"] = draft["entry"]
             if draft["review"]:
                 stay["review"] = draft["review"]
             stays.append(stay)

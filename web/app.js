@@ -380,6 +380,8 @@ function staysFor(layer2) {
     start: fieldText(stay, "start"),
     end: fieldText(stay, "end"),
     review: fieldText(stay, "review"),
+    exit: stay.exit || null,
+    entry: stay.entry || null,
   })) : [];
   const add = document.createElement("button");
   add.type = "button";
@@ -412,11 +414,23 @@ function staysFor(layer2) {
       block.append(name, value);
       row.append(block);
     }
+    const actions = document.createElement("div");
+    actions.className = "row-actions";
+    for (const [label, stamp] of [["Exit stamp", stay.exit], ["Entry stamp", stay.entry]]) {
+      const file = stamp && fieldText(stamp, "file");
+      if (!/^seals\/\d+\.jpg$/.test(file)) continue;
+      const open = document.createElement("button");
+      open.type = "button";
+      open.textContent = label;
+      open.addEventListener("click", () => openStamp(file));
+      actions.append(open);
+    }
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = "Edit";
     button.addEventListener("click", () => openStay(index));
-    row.append(button);
+    actions.append(button);
+    row.append(actions);
     row.append(verdictGroup("Does this stay look right?", stay.review, (review) => {
       const next = stays.map((item, itemIndex) => ({
         ...item,
@@ -436,6 +450,8 @@ function openStay(index) {
   document.querySelector("#stay-title").textContent = "Edit stay";
   stayForm.elements.departure_country.value = stay.departure_country;
   stayForm.elements.arrival_country.value = stay.arrival_country;
+  stayForm.elements.start.value = toDateInput(stay.start);
+  stayForm.elements.end.value = toDateInput(stay.end);
   stayDialog.showModal();
 }
 
@@ -451,15 +467,25 @@ stayCancel.addEventListener("click", () => stayDialog.close());
 stayForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (editing < 0 || editing > stays.length) return;
+  const startValue = stayForm.elements.start.value;
+  const endValue = stayForm.elements.end.value;
+  if (startValue && endValue && endValue < startValue) {
+    stayForm.elements.end.setCustomValidity("The end date cannot be earlier than the start date.");
+    stayForm.reportValidity();
+    stayForm.elements.end.setCustomValidity("");
+    return;
+  }
   if (!stayForm.reportValidity()) return;
   const next = stays.map((stay) => ({ ...stay }));
   const existing = editing < stays.length ? stays[editing] : null;
   const draft = {
     departure_country: stayForm.elements.departure_country.value.trim(),
     arrival_country: stayForm.elements.arrival_country.value.trim(),
-    start: existing ? existing.start : "",
-    end: existing ? existing.end : "",
+    start: fromDateInput(startValue),
+    end: fromDateInput(endValue),
     review: existing ? existing.review : "",
+    exit: existing ? existing.exit : null,
+    entry: existing ? existing.entry : null,
   };
   if (editing === stays.length) next.push(draft);
   else next[editing] = draft;

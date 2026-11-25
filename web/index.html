@@ -80,6 +80,16 @@
       <input id="departure-country" name="departure_country" autocomplete="off" maxlength="200">
       <label for="arrival-country">Arrival country</label>
       <input id="arrival-country" name="arrival_country" autocomplete="off" maxlength="200">
+      <div class="date-pair">
+        <div>
+          <label for="start-date">Start date</label>
+          <input id="start-date" name="start" type="date" min="1940-01-01" max="2029-12-31" autocomplete="off">
+        </div>
+        <div>
+          <label for="end-date">End date</label>
+          <input id="end-date" name="end" type="date" min="1940-01-01" max="2029-12-31" autocomplete="off">
+        </div>
+      </div>
       <div class="dialog-actions">
         <button type="submit">Save</button>
         <button type="button" id="stay-cancel">Cancel</button>

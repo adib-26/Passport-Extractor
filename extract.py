@@ -2846,6 +2846,40 @@ def _dated_events(seals: list[dict]) -> list[dict]:
     return events
 
 
+def _stamp_ref(event: dict | None) -> dict | None:
+    if not event:
+        return None
+    stamp = {}
+    file = str(event.get("file") or "")
+    if re.fullmatch(r"seals/\d+\.jpg", file):
+        stamp["file"] = file
+    page = event.get("page")
+    if isinstance(page, int) and page > 0:
+        stamp["page"] = page
+    box = event.get("box")
+    if isinstance(box, list) and len(box) == 4:
+        stamp["box"] = box
+    return stamp or None
+
+
+def _stay_stamps(events: list[dict], end_only: bool = False) -> tuple[dict | None, dict | None]:
+    """The departure stamp is the exit. The arrival stamp is the entry."""
+    exit_stamp = None
+    entry_stamp = None
+    for event in events:
+        if not event:
+            continue
+        stamp = _stamp_ref(event)
+        if event.get("role") == "departure" or end_only:
+            if exit_stamp is None:
+                exit_stamp = stamp
+        elif entry_stamp is None:
+            entry_stamp = stamp
+        elif exit_stamp is None:
+            exit_stamp = stamp
+    return exit_stamp, entry_stamp
+
+
 def _pair_events(events: list[dict]) -> list[dict]:
     """Pair only dates from the same country, earlier first, without losing any date."""
     grouped: dict[str, list[dict]] = {}
@@ -2877,11 +2911,17 @@ def _pair_events(events: list[dict]) -> list[dict]:
 
             country = first["country"]
             home = country.casefold() == "malaysia"
+            exit_stamp, entry_stamp = _stay_stamps(
+                [first, second] if pair else [first],
+                end_only=not pair and first["role"] == "departure",
+            )
             stays.append({
                 "departure_country": "" if home else ("Malaysia" if country else ""),
                 "arrival_country": country,
                 "start": start,
                 "end": end,
+                "exit": exit_stamp,
+                "entry": entry_stamp,
                 "_when": first["when"],
                 "_id": first["id"],
             })
